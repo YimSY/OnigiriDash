@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Onigiri Dash!</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+
+        body, html {
+            margin: 0; padding: 0; width: 100%; height: 100%;
+            background-color: #fce4ec; /* Pastel pink background */
+            display: flex; justify-content: center; align-items: center;
+            font-family: 'Press Start 2P', cursive;
+            touch-action: none; /* Prevent mobile pull-to-refresh / scrolling */
+            overflow: hidden;
+        }
+
+        #game-container {
+            position: relative;
+            width: 100%; max-width: 400px;
+            height: 100%; max-height: 700px;
+            background-color: #e0f7fa; /* Pastel blue sky */
+            border: 4px solid #333;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+
+        canvas {
+            display: block; width: 100%; height: 100%;
+            image-rendering: pixelated;
+        }
+
+        .ui-layer {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; text-align: center;
+        }
+
+        #score-display {
+            position: absolute; top: 20px; font-size: 24px; color: #ff80ab;
+            text-shadow: 2px 2px 0 #fff, -2px -2px 0 #fff, 2px -2px 0 #fff, -2px 2px 0 #fff;
+            z-index: 10;
+        }
+
+        .screen {
+            background: rgba(255, 255, 255, 0.9);
+            padding: 20px; border: 4px solid #ff80ab; border-radius: 10px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1); pointer-events: auto;
+            display: flex; flex-direction: column; align-items: center; gap: 15px;
+        }
+
+        h1, h2 { color: #ff4081; margin: 0; line-height: 1.4; font-size: 20px; }
+        p { font-size: 10px; color: #555; line-height: 1.6; }
+
+        .btn {
+            background: #ff80ab; border: 4px solid #ff4081; color: white;
+            padding: 15px 20px; font-family: 'Press Start 2P', cursive;
+            font-size: 12px; cursor: pointer; border-radius: 8px;
+            text-decoration: none; transition: transform 0.1s, background 0.2s;
+        }
+        .btn:active { transform: scale(0.95); }
+        .btn:hover { background: #ff4081; }
+
+        #gift-container {
+            font-size: 60px; cursor: pointer; transition: transform 0.2s;
+            animation: bounce 1s infinite alternate; pointer-events: auto;
+        }
+        @keyframes bounce { from { transform: translateY(0); } to { transform: translateY(-10px); } }
+        
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <div id="score-display">0</div>
+    <canvas id="gameCanvas" width="360" height="640"></canvas>
+
+    <!-- Start Screen -->
+    <div id="start-screen" class="ui-layer">
+        <div class="screen">
+            <h1>ONIGIRI<br>DASH</h1>
+            <p>Tap to jump.<br>Avoid bamboo.<br>Reach 520 to win!</p>
+            <button class="btn" id="start-btn">PLAY</button>
+        </div>
+    </div>
+
+    <!-- Game Over Screen -->
+    <div id="gameover-screen" class="ui-layer hidden">
+        <div class="screen">
+            <h2>OH NO!</h2>
+            <p>The Onigiri dropped!</p>
+            <button class="btn" id="restart-btn">TRY AGAIN</button>
+        </div>
+    </div>
+
+    <!-- Win Sequence Screen (Overlay that appears after animation) -->
+    <div id="win-screen" class="ui-layer hidden">
+        <div class="screen" style="background: rgba(255,255,255,0.95);">
+            <h2>YAY! 520!</h2>
+            <p>You found your Sushi friend!</p>
+            <div id="gift-container">🎁</div>
+            <p id="gift-hint">Tap to open!</p>
+            <a id="reward-link" href="https://example.com" target="_blank" class="btn hidden">CLAIM REWARD</a>
+        </div>
+    </div>
+</div>
+
+<script>
+/**
+ * AUDIO SYNTHESIZER
+ * Generates 8-bit sound effects using Web Audio API
+ */
+const AudioContext = window.AudioContext || window.webkitAudioContext;
+let audioCtx;
+let bgmOsc = null;
+let bgmInterval = null;
+
+function initAudio() {
+    if (!audioCtx) audioCtx = new AudioContext();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+}
+
+function playTone(freq, type, duration, vol=0.1) {
+    if(!audioCtx) return;
+    let osc = audioCtx.createOscillator();
+    let gain = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+    gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + duration);
+}
+
+const sfx = {
+    jump: () => { playTone(400, 'square', 0.1, 0.05); setTimeout(() => playTone(600, 'square', 0.1, 0.05), 50); },
+    score: () => { playTone(1200, 'sine', 0.1, 0.05); setTimeout(() => playTone(1600, 'sine', 0.2, 0.05), 100); },
+    hit: () => { playTone(150, 'sawtooth', 0.3, 0.1); },
+    win: () => { 
+        const notes = [400, 500, 600, 800, 1000, 1200];
+        notes.forEach((n, i) => setTimeout(() => playTone(n, 'square', 0.2, 0.1), i * 150));
+    }
+};
+
+function startBGM() {
+    if(bgmInterval) clearInterval(bgmInterval);
+    const melody = [261.63, 329.63, 392.00, 523.25, 392.00, 329.63]; // C E G C G E (Cute loop)
+    let noteIdx = 0;
+    bgmInterval = setInterval(() => {
+        playTone(melody[noteIdx], 'sine', 0.2, 0.03);
+        noteIdx = (noteIdx + 1) % melody.length;
+    }, 300);
+}
+
+function stopBGM() {
+    if(bgmInterval) clearInterval(bgmInterval);
+}
+
+/**
+ * GAME ENGINE
+ */
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+// UI Elements
+const uiScore = document.getElementById('score-display');
+const screens = {
+    start: document.getElementById('start-screen'),
+    gameover: document.getElementById('gameover-screen'),
+    win: document.getElementById('win-screen')
+};
+const giftContainer = document.getElementById('gift-container');
+const giftHint = document.getElementById('gift-hint');
+const rewardLink = document.getElementById('reward-link');
+
+// Game Constants & State
+const GRAVITY = 0.25;
+const JUMP_FORCE = -5.5;
+const SPEED = 2.5; 
+const PIPE_SPACING = 345; // Spaced to achieve exactly 2 minutes (120s) for 520 score
+const WIN_SCORE = 20;
+
+let state = 'START'; // START, PLAY, WIN_ANIM, WIN_UI, OVER
+let frames = 0;
+let score = 0;
+let pipes = [];
+let clouds = [];
+
+let player = { x: 80, y: 320, v: 0, radius: 18 };
+let winAnimState = { sushiX: 400, playerX: 80, playerY: 320, step: 0, heartSize: 0 };
+
+// Draw Methods (Procedural Pixel Art)
+function drawOnigiri(x, y, isWin = false) {
+    ctx.save();
+    ctx.translate(x, y);
+    // Slight bobbing in win screen
+    if(isWin && frames % 60 < 30) ctx.translate(0, -2); 
+
+    // Main Rice Body (Triangle-ish)
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath();
+    ctx.arc(0, 5, 16, 0, Math.PI * 2);
+    ctx.moveTo(-16, 5); ctx.lineTo(0, -18); ctx.lineTo(16, 5);
+    ctx.fill();
+
+    // Nori (Seaweed)
+    ctx.fillStyle = "#2c3e50";
+    ctx.fillRect(-10, 5, 20, 12);
+
+    // Cute Face
+    ctx.fillStyle = "#000000";
+    ctx.fillRect(-8, -4, 4, 4); // Left eye
+    ctx.fillRect(4, -4, 4, 4);  // Right eye
+    
+    ctx.fillStyle = "#ff80ab"; // Cheeks
+    ctx.fillRect(-14, -2, 4, 3);
+    ctx.fillRect(10, -2, 4, 3);
+
+    // Mouth (Changes if jumping or winning)
+    ctx.fillStyle = "#000000";
+    if (isWin) {
+        ctx.fillRect(-2, -2, 4, 3); // Open happy mouth
+    } else if (player.v < 0) {
+        ctx.fillRect(-2, -1, 4, 4); // "O" shape when jumping
+    } else {
+        ctx.fillRect(-2, -1, 4, 2); // Neutral line
+    }
+    
+    ctx.restore();
+}
+
+function drawSushi(x, y) {
+    ctx.save();
+    ctx.translate(x, y);
+    if(frames % 60 < 30) ctx.translate(0, -2); // Bobbing
+
+    // Nori Border
+    ctx.fillStyle = "#1a252c";
+    ctx.beginPath(); ctx.arc(0, 0, 18, 0, Math.PI * 2); ctx.fill();
+    // Rice
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath(); ctx.arc(0, 0, 14, 0, Math.PI * 2); ctx.fill();
+    // Fillings (Salmon and Egg)
+    ctx.fillStyle = "#ff7043"; ctx.fillRect(-6, -6, 8, 8);
+    ctx.fillStyle = "#fbc02d"; ctx.fillRect(0, -2, 6, 6);
+    ctx.fillStyle = "#66bb6a"; ctx.fillRect(-3, 2, 5, 5);
+    
+    // Face
+    ctx.fillStyle = "#000";
+    ctx.fillRect(-8, -8, 3, 3); ctx.fillRect(5, -8, 3, 3);
+    ctx.fillStyle = "#ff80ab";
+    ctx.fillRect(-12, -5, 3, 2); ctx.fillRect(9, -5, 3, 2);
+
+    ctx.restore();
+}
+
+function drawHeart(x, y, scale) {
+    if (scale <= 0) return;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(scale, scale);
+    ctx.fillStyle = "#ff1744";
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.bezierCurveTo(-10, -10, -20, 5, 0, 15);
+    ctx.bezierCurveTo(20, 5, 10, -10, 0, 0);
+    ctx.fill();
+    ctx.restore();
+}
+
+function drawPipe(p) {
+    const w = p.w;
+    // Bamboo Base
+    ctx.fillStyle = "#66bb6a";
+    ctx.fillRect(p.x, 0, w, p.top);
+    ctx.fillRect(p.x, canvas.height - p.bot, w, p.bot);
+
+    // Bamboo Outlines and highlights
+    ctx.fillStyle = "#43a047";
+    ctx.fillRect(p.x + w - 8, 0, 8, p.top);
+    ctx.fillRect(p.x + w - 8, canvas.height - p.bot, 8, p.bot);
+
+    // Bamboo Joints
+    ctx.fillStyle = "#2e7d32";
+    for(let y = 40; y < p.top; y += 60) ctx.fillRect(p.x - 4, y, w + 8, 10);
+    for(let y = canvas.height - p.bot + 40; y < canvas.height; y += 60) ctx.fillRect(p.x - 4, y, w + 8, 10);
+}
+
+function drawBackground() {
+    // Generate some procedural clouds
+    if (frames % 100 === 0) {
+        clouds.push({ x: canvas.width, y: Math.random() * 200 + 50, s: Math.random() * 0.5 + 0.5 });
+    }
+    ctx.fillStyle = "#ffffff";
+    clouds.forEach((c, i) => {
+        c.x -= 0.5 * c.s;
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, 20 * c.s, 0, Math.PI*2);
+        ctx.arc(c.x + 15 * c.s, c.y - 10 * c.s, 25 * c.s, 0, Math.PI*2);
+        ctx.arc(c.x + 30 * c.s, c.y, 20 * c.s, 0, Math.PI*2);
+        ctx.fill();
+        if (c.x < -100) clouds.splice(i, 1);
+    });
+}
+
+function spawnPipe() {
+    const gap = 160; // Size of the hole to pass through
+    const minHeight = 60;
+    const maxTop = canvas.height - gap - minHeight;
+    const topHeight = Math.floor(Math.random() * (maxTop - minHeight + 1)) + minHeight;
+    
+    pipes.push({
+        x: canvas.width,
+        w: 50,
+        top: topHeight,
+        bot: canvas.height - topHeight - gap,
+        passed: false
+    });
+}
+
+function resetGame() {
+    player = { x: 80, y: 320, v: 0, radius: 18 };
+    pipes = [];
+    score = 0;
+    frames = 0;
+    uiScore.innerText = score;
+    screens.gameover.classList.add('hidden');
+    screens.win.classList.add('hidden');
+    spawnPipe();
+    state = 'PLAY';
+    startBGM();
+}
+
+function checkCollisions() {
+    // Ground and Ceiling
+    if (player.y + player.radius > canvas.height || player.y - player.radius < 0) return true;
+
+    // Pipes
+    for (let p of pipes) {
+        // Simple AABB Collision box for Onigiri
+        let pLeft = player.x - 12; let pRight = player.x + 12;
+        let pTop = player.y - 15; let pBot = player.y + 15;
+        
+        if (pRight > p.x && pLeft < p.x + p.w) {
+            if (pTop < p.top || pBot > canvas.height - p.bot) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+function update() {
+    frames++;
+
+    if (state === 'PLAY') {
+        player.v += GRAVITY;
+        player.y += player.v;
+
+        // Move and manage pipes
+        pipes.forEach(p => p.x -= SPEED);
+        if (pipes.length > 0 && pipes[pipes.length - 1].x < canvas.width - PIPE_SPACING) {
+            spawnPipe();
+        }
+        if (pipes[0] && pipes[0].x < -pipes[0].w) pipes.shift();
+
+        // Score logic
+        pipes.forEach(p => {
+            if (!p.passed && p.x + p.w < player.x) {
+                p.passed = true;
+                score += 10;
+                uiScore.innerText = score;
+                sfx.score();
+
+                if (score >= WIN_SCORE) {
+                    triggerWinAnimation();
+                }
+            }
+        });
+
+        if (checkCollisions()) {
+            state = 'OVER';
+            sfx.hit();
+            stopBGM();
+            screens.gameover.classList.remove('hidden');
+        }
+    } 
+    else if (state === 'WIN_ANIM') {
+        // Step 1: Center Onigiri, bring in Sushi
+        winAnimState.step++;
+        
+        // Float to center horizontally
+        if (winAnimState.playerX < 140) winAnimState.playerX += 1;
+        // Float to center vertically
+        if (winAnimState.playerY > canvas.height/2) winAnimState.playerY -= 1;
+        if (winAnimState.playerY < canvas.height/2) winAnimState.playerY += 1;
+        
+        // Move Sushi in
+        if (winAnimState.sushiX > 200) winAnimState.sushiX -= 2;
+
+        // The Hug (when they are close)
+        if (winAnimState.sushiX <= 200 && winAnimState.step > 100) {
+            if (winAnimState.heartSize < 1) winAnimState.heartSize += 0.05;
+            
+            // Wait a moment, then show UI
+            if (winAnimState.step > 200) {
+                state = 'WIN_UI';
+                screens.win.classList.remove('hidden');
+            }
+        }
+    }
+}
+
+function draw() {
+    // Clear & Sky
+    ctx.fillStyle = "#e0f7fa";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    drawBackground();
+
+    if (state === 'PLAY' || state === 'OVER') {
+        pipes.forEach(drawPipe);
+        drawOnigiri(player.x, player.y, false);
+    } 
+    else if (state === 'WIN_ANIM' || state === 'WIN_UI') {
+        drawOnigiri(winAnimState.playerX, winAnimState.playerY, true);
+        drawSushi(winAnimState.sushiX, winAnimState.playerY); // Same Y to hug
+        if (winAnimState.heartSize > 0) {
+            drawHeart(170, winAnimState.playerY - 40, winAnimState.heartSize);
+        }
+    }
+}
+
+function gameLoop() {
+    update();
+    draw();
+    requestAnimationFrame(gameLoop);
+}
+
+function triggerWinAnimation() {
+    state = 'WIN_ANIM';
+    stopBGM();
+    sfx.win();
+    uiScore.style.display = 'none'; // Hide score
+    winAnimState = {
+        playerX: player.x,
+        playerY: player.y,
+        sushiX: canvas.width + 50,
+        step: 0,
+        heartSize: 0
+    };
+}
+
+function handleInput(e) {
+    if (e.type !== 'keydown') e.preventDefault(); // Stop mobile scroll
+    if (e.type === 'keydown' && e.code !== 'Space') return;
+
+    initAudio();
+
+    if (state === 'START') {
+        screens.start.classList.add('hidden');
+        resetGame();
+    } else if (state === 'PLAY') {
+        player.v = JUMP_FORCE;
+        sfx.jump();
+    } else if (state === 'OVER') {
+        resetGame();
+    }
+}
+
+// Event Listeners
+['touchstart', 'mousedown'].forEach(evt => {
+    canvas.addEventListener(evt, handleInput, {passive: false});
+});
+window.addEventListener('keydown', handleInput);
+
+document.getElementById('start-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    initAudio();
+    screens.start.classList.add('hidden');
+    resetGame();
+});
+
+document.getElementById('restart-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    resetGame();
+});
+
+// Gift Interaction Logic
+giftContainer.addEventListener('click', () => {
+    if(giftContainer.innerText === '🎁') {
+        sfx.score();
+        giftContainer.innerText = '🎊';
+        giftHint.innerText = 'Surprise!';
+        rewardLink.classList.remove('hidden');
+        // Create simple confetti explosion via CSS animation on the icon
+        giftContainer.style.transform = "scale(1.5)";
+        setTimeout(() => { giftContainer.style.transform = "scale(1)"; }, 200);
+    }
+});
+
+// Start loop
+gameLoop();
+
+</script>
+</body>
+</html>
